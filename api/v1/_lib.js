@@ -138,6 +138,17 @@ async function rpcBatch(calls) {
         const j = await res.json();
         const arr = Array.isArray(j) ? j : [j];
         arr.sort((a, b) => a.id - b.id);
+
+        /* Нода может ответить двумястами и при этом положить ошибку внутрь
+           каждого элемента — так ведёт себя приватный узел на отдельных
+           eth_call. Транспортно это успех, поэтому переход на резервную ноду
+           здесь не включался, и вызывающий получал 503 на паре, которую
+           публичный узел считает без запинки. Полный отказ внутри ответа
+           приравниваем к отказу узла и пробуем следующий. */
+        if (arr.length && arr.every((x) => x && x.error) && upstream !== UPSTREAMS.at(-1)) {
+          last = new Error(arr[0].error?.message || "node returned errors for every call");
+          break; // к следующему узлу, повторять этот бессмысленно
+        }
         return arr;
       } catch (e) {
         if (e.status && e.status !== 429 && e.status < 500) throw e;
