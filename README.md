@@ -71,6 +71,16 @@ and wiring a bundler for six functions costs more than a copy carrying this
 note. Both are checked byte for byte against each other, and the originals are
 verified against `cast`. **If you change one, change both.**
 
+## For agents
+
+The same endpoints arrive as MCP tools through
+[voxelithic-mcp](https://www.npmjs.com/package/voxelithic-mcp), which is a thin
+client over this API and holds no keys either:
+
+```json
+{ "mcpServers": { "voxelithic": { "command": "npx", "args": ["-y", "voxelithic-mcp"] } } }
+```
+
 ## Service level
 
 In the [spec](https://voxelithic.xyz/api/v1/openapi.json), stated plainly:
