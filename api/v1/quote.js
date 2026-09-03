@@ -49,7 +49,7 @@ module.exports = handler(
     const amountIn = toRaw(q.amountIn, tin.decimals);
     if (amountIn <= 0n) throw bad("amountIn must be greater than zero");
 
-    const { best, all, considered, priceImpactBps } = await quoteBest({
+    const { best, all, considered, answered, priceImpactBps } = await quoteBest({
       tokenIn: tin.address,
       tokenOut: tout.address,
       amountIn,
@@ -63,6 +63,7 @@ module.exports = handler(
         tokenOut: tout,
         amountIn: q.amountIn,
         poolsConsidered: considered,
+        poolsThatAnswered: answered,
         quote: null,
         reason: considered
           ? "no pool could fill the whole amount at this size"
@@ -77,6 +78,9 @@ module.exports = handler(
       amountIn: q.amountIn,
       amountInRaw: amountIn,
       poolsConsidered: considered,
+      /* Сколько пулов реально ответило. Меньше рассмотренных — значит часть
+         групп не дошла, и лучшая цена могла остаться неопрошенной. */
+      poolsThatAnswered: answered,
       poolsThatCouldFill: all.length,
       quote: {
         amountOut: fromRaw(best.out, tout.decimals),

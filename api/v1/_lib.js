@@ -10,9 +10,14 @@
 
 const DATA = require("./_data.json");
 
-/* Ключ ноды живёт только на сервере: у Chainstack он прямо в адресе. */
-const UPSTREAM =
-  process.env.VOX_RPC_UPSTREAM || "https://rpc.mainnet.chain.robinhood.com";
+/* Ключ ноды живёт только на сервере: у Chainstack он прямо в адресе.
+   Публичная нода идёт вторым номером — все запросы здесь только на чтение,
+   так что переход на неё ничего не раскрывает и ничем не рискует. Обе сразу
+   отказывают заметно реже, чем каждая по отдельности. */
+const UPSTREAMS = [
+  process.env.VOX_RPC_UPSTREAM,
+  "https://rpc.mainnet.chain.robinhood.com",
+].filter(Boolean);
 
 /* Публичная нода отвечает 403 без браузерного User-Agent. */
 const UA =
@@ -110,34 +115,37 @@ const ATTEMPTS = 3;
 async function rpcBatch(calls) {
   if (!calls.length) return [];
   const body = calls.map((c) => ({ jsonrpc: "2.0", id: ++reqId, ...c }));
+  const payload = JSON.stringify(body);
 
   let last;
-  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-    if (attempt) await sleep(120 * 2 ** (attempt - 1) + Math.random() * 80);
-    try {
-      const res = await fetch(UPSTREAM, {
-        method: "POST",
-        headers: { "content-type": "application/json", "user-agent": UA },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const e = new Error("rpc http " + res.status);
-        e.status = res.status;
-        // 4xx кроме 429 — наш запрос, повтор не поможет.
-        if (res.status !== 429 && res.status < 500) throw e;
+  for (const upstream of UPSTREAMS) {
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      if (attempt) await sleep(120 * 2 ** (attempt - 1) + Math.random() * 80);
+      try {
+        const res = await fetch(upstream, {
+          method: "POST",
+          headers: { "content-type": "application/json", "user-agent": UA },
+          body: payload,
+        });
+        if (!res.ok) {
+          const e = new Error("rpc http " + res.status);
+          e.status = res.status;
+          // 4xx кроме 429 — наш запрос, повтор не поможет и вторая нода не спасёт.
+          if (res.status !== 429 && res.status < 500) throw e;
+          last = e;
+          continue;
+        }
+        const j = await res.json();
+        const arr = Array.isArray(j) ? j : [j];
+        arr.sort((a, b) => a.id - b.id);
+        return arr;
+      } catch (e) {
+        if (e.status && e.status !== 429 && e.status < 500) throw e;
         last = e;
-        continue;
       }
-      const j = await res.json();
-      const arr = Array.isArray(j) ? j : [j];
-      arr.sort((a, b) => a.id - b.id);
-      return arr;
-    } catch (e) {
-      if (e.status && e.status !== 429 && e.status < 500) throw e;
-      last = e;
     }
   }
-  const e = new Error("upstream unavailable after " + ATTEMPTS + " attempts");
+  const e = new Error("no upstream answered");
   e.upstream = true;
   e.cause = last;
   throw e;
@@ -228,23 +236,20 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
 
   const res = await rpcBatch(calls);
   const quotes = [];
+  let answered = 0;
 
-  /* Нечитаемый ответ — это не «нет ликвидности», а «мы не знаем». Разница
-     принципиальная: первое вызывающий воспримет как факт о рынке и уйдёт, а
-     второе означает повторить запрос. Молча возвращать пустую книгу нельзя. */
+  /* Падение одной группы не должно убивать всю котировку: остальные пулы уже
+     ответили, и их цены годны. Раньше любой сбойный чанк ронял запрос целиком,
+     из-за чего разовые осечки ноды выглядели как отказ сервиса.
+     Но если не ответил НИ ОДИН — это «мы не знаем», а не «нет ликвидности»:
+     первое означает повторить, второе вызывающий примет за факт о рынке. */
   chunks.forEach((c, ci) => {
     const r = res[ci];
-    if (!r || r.error || !r.result || r.result === "0x") {
-      const e = new Error(`quoter did not answer for ${c.family}`);
-      e.upstream = true;
-      throw e;
-    }
+    if (!r || r.error || !r.result || r.result === "0x") return;
     const dec = decodeQuoteMany(r.result);
-    if (!dec) {
-      const e = new Error(`quoter answer for ${c.family} could not be decoded`);
-      e.upstream = true;
-      throw e;
-    }
+    if (!dec) return;
+    answered += c.legs.length;
+
     c.legs.forEach((l, i) => {
       const out = dec.outs[i] ?? 0n;
       if (out <= 0n || dec.paid[i] !== BigInt(amountIn)) return;
@@ -262,7 +267,15 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
     });
   });
 
-  if (!quotes.length) return { best: null, considered: legs3.length + legs4.length };
+  if (!answered) {
+    const e = new Error("the quoter did not answer for any pool");
+    e.upstream = true;
+    throw e;
+  }
+
+  if (!quotes.length) {
+    return { best: null, considered: legs3.length + legs4.length, answered };
+  }
 
   quotes.sort((a, b) => (b.out > a.out ? 1 : b.out < a.out ? -1 : 0));
   const best = quotes[0];
@@ -310,7 +323,8 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
     }
   }
 
-  return { best, all: quotes, considered: legs3.length + legs4.length, priceImpactBps };
+  return { best, all: quotes, considered: legs3.length + legs4.length,
+           answered, priceImpactBps };
 }
 
 /* ──────────────────────── разрешение тикеров ─────────────────────────── */
