@@ -213,8 +213,26 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
   const quotes = [];
   let ri = 0;
 
+  /* Нечитаемый ответ — это не «нет ликвидности», а «мы не знаем». Разница
+     принципиальная: первое вызывающий воспримет как факт о рынке и уйдёт, а
+     второе означает повторить запрос. Молча возвращать пустую книгу нельзя. */
+  const decodeOrFail = (r, family) => {
+    if (!r || r.error || !r.result || r.result === "0x") {
+      const e = new Error(`quoter did not answer for ${family}`);
+      e.upstream = true;
+      throw e;
+    }
+    const dec = decodeQuoteMany(r.result);
+    if (!dec) {
+      const e = new Error(`quoter answer for ${family} could not be decoded`);
+      e.upstream = true;
+      throw e;
+    }
+    return dec;
+  };
+
   if (legs3.length) {
-    const dec = decodeQuoteMany(res[ri]?.result);
+    const dec = decodeOrFail(res[ri], "v3");
     ri++;
     if (dec) {
       legs3.forEach((l, i) => {
@@ -230,7 +248,7 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
   }
 
   if (legs4.length) {
-    const dec = decodeQuoteMany(res[ri]?.result);
+    const dec = decodeOrFail(res[ri], "v4");
     if (dec) {
       legs4.forEach((l, i) => {
         const out = dec.outs[i] ?? 0n;
