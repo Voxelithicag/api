@@ -153,7 +153,14 @@ async function rpcBatch(calls) {
 
 async function rpc(method, params = []) {
   const [r] = await rpcBatch([{ method, params }]);
-  if (!r || r.error) throw new Error(r?.error?.message || "rpc error");
+  if (!r || r.error) {
+    /* Помечаем как апстрим, иначе обработчик отдаёт непрозрачную 502 и
+       вызывающий не понимает, что запрос был верным и повтор имеет смысл.
+       На этом пути ошибка теряла классификацию: поймано в /verify. */
+    const e = new Error(r?.error?.message || "no answer from the node");
+    e.upstream = true;
+    throw e;
+  }
   return r.result;
 }
 
