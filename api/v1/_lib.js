@@ -98,23 +98,49 @@ function decodeQuoteMany(hex) {
 
 let reqId = 0;
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* Нода периодически придерживает запрос или отвечает пятисоткой. Без повтора
+   одна такая осечка превращалась в 502 для вызывающего — именно это и поймал
+   CI, когда три параллельных прогона пришли одновременно. Попыток немного и
+   пауза короткая: функция живёт секунды, и лучше честно сказать «недоступно»,
+   чем висеть до таймаута платформы. */
+const ATTEMPTS = 3;
+
 async function rpcBatch(calls) {
   if (!calls.length) return [];
   const body = calls.map((c) => ({ jsonrpc: "2.0", id: ++reqId, ...c }));
-  const res = await fetch(UPSTREAM, {
-    method: "POST",
-    headers: { "content-type": "application/json", "user-agent": UA },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const e = new Error("rpc http " + res.status);
-    e.status = res.status;
-    throw e;
+
+  let last;
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    if (attempt) await sleep(120 * 2 ** (attempt - 1) + Math.random() * 80);
+    try {
+      const res = await fetch(UPSTREAM, {
+        method: "POST",
+        headers: { "content-type": "application/json", "user-agent": UA },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const e = new Error("rpc http " + res.status);
+        e.status = res.status;
+        // 4xx кроме 429 — наш запрос, повтор не поможет.
+        if (res.status !== 429 && res.status < 500) throw e;
+        last = e;
+        continue;
+      }
+      const j = await res.json();
+      const arr = Array.isArray(j) ? j : [j];
+      arr.sort((a, b) => a.id - b.id);
+      return arr;
+    } catch (e) {
+      if (e.status && e.status !== 429 && e.status < 500) throw e;
+      last = e;
+    }
   }
-  const j = await res.json();
-  const arr = Array.isArray(j) ? j : [j];
-  arr.sort((a, b) => a.id - b.id);
-  return arr;
+  const e = new Error("upstream unavailable after " + ATTEMPTS + " attempts");
+  e.upstream = true;
+  e.cause = last;
+  throw e;
 }
 
 async function rpc(method, params = []) {
@@ -313,8 +339,18 @@ function handler(fn, { methods = ["GET"], cacheSeconds = 0 } = {}) {
       );
       return res.status(200).json(jsonSafe(out));
     } catch (e) {
-      const status = e.status === 429 ? 429 : e.expose ? 400 : 502;
-      return res.status(status).json({ error: e.expose ? e.message : "upstream failure" });
+      if (e.expose) return res.status(400).json({ error: e.message });
+      if (e.status === 429) {
+        res.setHeader("retry-after", "5");
+        return res.status(429).json({ error: "upstream is throttling; retry shortly" });
+      }
+      /* 503 вместо 502 намеренно: вызывающему важно понять, что запрос был
+         верным и повтор имеет смысл. Внутренности апстрима наружу не отдаём. */
+      if (e.upstream) {
+        res.setHeader("retry-after", "2");
+        return res.status(503).json({ error: "upstream unavailable; the request was valid, retry" });
+      }
+      return res.status(502).json({ error: "unexpected failure" });
     }
   };
 }
