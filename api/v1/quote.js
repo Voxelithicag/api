@@ -49,7 +49,7 @@ module.exports = handler(
     const amountIn = toRaw(q.amountIn, tin.decimals);
     if (amountIn <= 0n) throw bad("amountIn must be greater than zero");
 
-    const { best, all, considered } = await quoteBest({
+    const { best, all, considered, priceImpactBps } = await quoteBest({
       tokenIn: tin.address,
       tokenOut: tout.address,
       amountIn,
@@ -84,11 +84,26 @@ module.exports = handler(
         minOut: fromRaw(best.minOut, tout.decimals),
         minOutRaw: best.minOut,
         slippageBps,
+        /* Стоимость самого размера, а не разброс между площадками. Считается по
+           тому же пулу: цена за единицу на маленьком опорном объёме против
+           цены на запрошенном. Отдаём всегда, потому что вызывающий, у которого
+           нет справочной цены, иначе не отличит нормальную сделку от той, что
+           съедает пул. */
+        priceImpactBps,
         family: best.family,
         pool: best.pool || best.poolId,
         // Тот же объект уходит в /api/v1/swap: маршрут не нужно собирать заново.
         route: [best.hop],
       },
+      ...(priceImpactBps != null && priceImpactBps >= 100
+        ? {
+            warning:
+              `This size moves the price by ${(priceImpactBps / 100).toFixed(2)} percent ` +
+              `in the pool it would execute against. The quote is real and the router will ` +
+              `honour it, but the number is a consequence of the size and not the market rate. ` +
+              `Split the order or reduce it if that was not intended.`,
+          }
+        : {}),
       note:
         "Prices come from the pools themselves via the on-chain quoter. " +
         "Pools that could not take the full size are excluded, not estimated.",

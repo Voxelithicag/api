@@ -195,72 +195,72 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
   const legs4 = keysFor(tokenIn, tokenOut);
   if (!legs3.length && !legs4.length) return { best: null, considered: 0 };
 
-  const calls = [];
-  if (legs3.length) {
-    calls.push({
-      method: "eth_call",
-      params: [{ to: DATA.contracts.quoter, data: encodeQuoteMany(legs3, amountIn) }, "latest"],
-    });
-  }
-  if (legs4.length) {
-    calls.push({
-      method: "eth_call",
-      params: [{ to: DATA.contracts.quoterV4, data: encodeQuoteManyV4(legs4, amountIn) }, "latest"],
-    });
-  }
+  /* Пулы спрашиваем группами по три, а не все сразу.
+   *
+   * Котировка — это реальная симуляция свопа внутри eth_call, и её вес растёт
+   * с размером ордера. Семь пулов в одном вызове нода считает до сотни тысяч
+   * USDG, а на полумиллионе отказывает — при этом тот же объём по одному пулу
+   * считается без труда. Значит предел в весе вызова, а не в размере сделки,
+   * и лечится он нарезкой. Группы уходят одним батчем, лишнего круга нет. */
+  const CHUNK = 3;
+  const chunks = [];
+  const push = (legs, family) => {
+    for (let i = 0; i < legs.length; i += CHUNK) {
+      chunks.push({ family, legs: legs.slice(i, i + CHUNK) });
+    }
+  };
+  push(legs3, "v3");
+  push(legs4, "v4");
+
+  const calls = chunks.map((c) => ({
+    method: "eth_call",
+    params: [
+      {
+        to: c.family === "v3" ? DATA.contracts.quoter : DATA.contracts.quoterV4,
+        data:
+          c.family === "v3"
+            ? encodeQuoteMany(c.legs, amountIn)
+            : encodeQuoteManyV4(c.legs, amountIn),
+      },
+      "latest",
+    ],
+  }));
 
   const res = await rpcBatch(calls);
   const quotes = [];
-  let ri = 0;
 
   /* Нечитаемый ответ — это не «нет ликвидности», а «мы не знаем». Разница
      принципиальная: первое вызывающий воспримет как факт о рынке и уйдёт, а
      второе означает повторить запрос. Молча возвращать пустую книгу нельзя. */
-  const decodeOrFail = (r, family) => {
+  chunks.forEach((c, ci) => {
+    const r = res[ci];
     if (!r || r.error || !r.result || r.result === "0x") {
-      const e = new Error(`quoter did not answer for ${family}`);
+      const e = new Error(`quoter did not answer for ${c.family}`);
       e.upstream = true;
       throw e;
     }
     const dec = decodeQuoteMany(r.result);
     if (!dec) {
-      const e = new Error(`quoter answer for ${family} could not be decoded`);
+      const e = new Error(`quoter answer for ${c.family} could not be decoded`);
       e.upstream = true;
       throw e;
     }
-    return dec;
-  };
-
-  if (legs3.length) {
-    const dec = decodeOrFail(res[ri], "v3");
-    ri++;
-    if (dec) {
-      legs3.forEach((l, i) => {
-        const out = dec.outs[i] ?? 0n;
-        if (out > 0n && dec.paid[i] === BigInt(amountIn)) {
-          quotes.push({
-            family: "v3", pool: l.pool, feePpm: l.feePpm, zeroForOne: l.zeroForOne,
-            out, hop: { kind: 1, pool: l.pool, zeroForOne: l.zeroForOne, feePpm: 0 },
-          });
-        }
-      });
-    }
-  }
-
-  if (legs4.length) {
-    const dec = decodeOrFail(res[ri], "v4");
-    if (dec) {
-      legs4.forEach((l, i) => {
-        const out = dec.outs[i] ?? 0n;
-        if (out > 0n && dec.paid[i] === BigInt(amountIn)) {
-          quotes.push({
-            family: "v4", poolId: l.id, fee: l.key.fee, zeroForOne: l.zeroForOne,
-            out, hop: { key: l.key, zeroForOne: l.zeroForOne },
-          });
-        }
-      });
-    }
-  }
+    c.legs.forEach((l, i) => {
+      const out = dec.outs[i] ?? 0n;
+      if (out <= 0n || dec.paid[i] !== BigInt(amountIn)) return;
+      if (c.family === "v3") {
+        quotes.push({
+          family: "v3", pool: l.pool, feePpm: l.feePpm, zeroForOne: l.zeroForOne,
+          out, hop: { kind: 1, pool: l.pool, zeroForOne: l.zeroForOne, feePpm: 0 },
+        });
+      } else {
+        quotes.push({
+          family: "v4", poolId: l.id, fee: l.key.fee, zeroForOne: l.zeroForOne,
+          out, hop: { key: l.key, zeroForOne: l.zeroForOne },
+        });
+      }
+    });
+  });
 
   if (!quotes.length) return { best: null, considered: legs3.length + legs4.length };
 
@@ -268,7 +268,49 @@ async function quoteBest({ tokenIn, tokenOut, amountIn, slippageBps }) {
   const best = quotes[0];
   best.minOut = (best.out * BigInt(10_000 - slippageBps)) / 10_000n;
 
-  return { best, all: quotes, considered: legs3.length + legs4.length };
+  /* Влияние на цену: сколько стоит сам размер ордера.
+   *
+   * Без этой цифры API отдавал «вот ваша котировка» и на запросе, который
+   * выпивает пул целиком. Человек заметил бы абсурдную сумму, агент — нет: у
+   * него нет справочной цены, и он посчитал бы minOut от того, что дали.
+   *
+   * Спрашиваем только победивший пул и отдельным запросом, а не в общем батче:
+   * котировка большого объёма — тяжёлая симуляция, и удвоение её в одном
+   * батче нода уже не выдерживает. Сравнение идёт по тому же пулу, иначе
+   * мерили бы разброс между площадками, а не стоимость размера.
+   */
+  let priceImpactBps = 0;
+  const refIn = amountIn > 10_000n ? amountIn / 10_000n : 0n;
+
+  if (refIn > 0n) {
+    try {
+      const isV4 = best.family === "v4";
+      const leg = isV4
+        ? legs4.find((l) => l.id === best.poolId)
+        : legs3.find((l) => l.pool === best.pool);
+      if (leg) {
+        const raw = await ethCall(
+          isV4 ? DATA.contracts.quoterV4 : DATA.contracts.quoter,
+          isV4 ? encodeQuoteManyV4([leg], refIn) : encodeQuoteMany([leg], refIn)
+        );
+        const dec = decodeQuoteMany(raw);
+        const refOut = dec?.paid?.[0] === refIn ? dec.outs[0] : null;
+        if (refOut && refOut > 0n) {
+          const spot = (refOut * amountIn) / refIn; // выход по цене малого размера
+          const drop = spot > best.out ? spot - best.out : 0n;
+          priceImpactBps = Number((drop * 10_000n) / spot);
+        } else {
+          priceImpactBps = null; // не смогли измерить — врать нулём нельзя
+        }
+      }
+    } catch {
+      /* Влияние — дополнение, а не суть ответа. Если опорный запрос не прошёл,
+         честнее вернуть котировку с null, чем уронить весь запрос. */
+      priceImpactBps = null;
+    }
+  }
+
+  return { best, all: quotes, considered: legs3.length + legs4.length, priceImpactBps };
 }
 
 /* ──────────────────────── разрешение тикеров ─────────────────────────── */

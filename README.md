@@ -38,6 +38,19 @@ defaulted, because that number is the caller's protection and not ours to pick.
 quoter rather than modelled, so any answer here can be reproduced with an RPC
 and nothing else.
 
+**Every quote carries `priceImpactBps`.** A human notices an absurd number; an
+agent does not, because it has no independent price and will compute `minOut`
+from whatever it was handed. So the response states what the size itself costs
+in the pool it would execute against, measured against that same pool at a small
+reference size, and adds a `warning` above one percent. The quote is honest
+either way — the number just stops being the market rate once the order is large
+enough to eat the depth.
+
+Pools are queried in groups of three rather than all at once: a quote is a real
+swap simulation inside `eth_call`, and seven pools at half a million dollars
+exceeds what the node will compute in one call, while the same size through one
+pool is trivial. The limit is the weight of the call, not the size of the trade.
+
 ## Layout
 
 ```

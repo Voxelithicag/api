@@ -89,9 +89,19 @@ const spec = () => ({
             schema: { type: "integer", minimum: 0, maximum: 5000, default: 100 } },
         ],
         responses: {
-          200: { description: "quote, or quote:null when no pool could fill" },
+          200: {
+            description:
+              "A quote, or quote:null when no pool could fill the size. The quote carries " +
+              "priceImpactBps, which is what the size itself costs in the pool it would " +
+              "execute against, measured against the same pool at a small reference size. " +
+              "Above 100 bps the response also carries a warning field. A caller without " +
+              "an independent price should check that number before signing: the quote is " +
+              "honest, but on a large order it reflects the depth it consumed rather than " +
+              "the market rate.",
+          },
           400: { description: "bad parameters" },
           429: { description: "rate limited" },
+          503: { description: "the quoter could not be read; the request was valid, retry" },
         },
       },
     },
