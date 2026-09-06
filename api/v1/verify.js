@@ -27,23 +27,35 @@ module.exports = handler(
       return { tx, found: false, note: "no receipt yet; the transaction may still be pending" };
     }
 
-    const routers = [DATA.contracts.router, DATA.contracts.routerV4].map((a) => a.toLowerCase());
+    /* Сплит-роутер обязан быть в списке: он исполняет раскладку по нескольким
+       пулам и, хотя контракт третий, событие RouteExecuted испускает той же
+       формы — намеренно, чтобы читатели логов не ломались. Без него любая
+       раскладка проверялась как «транзакция не к нашему роутеру». */
+    const routers = [
+      DATA.contracts.router,
+      DATA.contracts.routerV4,
+      DATA.contracts.routerSplit,
+    ].map((a) => a.toLowerCase());
     const to = (receipt.to || "").toLowerCase();
     const succeeded = receipt.status === "0x1";
 
-    if (!routers.includes(to)) {
-      return {
-        tx, found: true, ours: false, status: succeeded ? "success" : "reverted",
-        to: receipt.to,
-        note: "this transaction did not go to a Voxelithic router",
-      };
-    }
-
+    /* Признак «наша сделка» — эмитент события, а не адрес получателя
+       транзакции. Роутер часто вызывают не напрямую, а из чужого контракта:
+       тогда receipt.to — этот контракт, и проверка по нему объявляла бы
+       собственный исполненный маршрут чужим. Адрес в логе проставляет сама
+       EVM, поэтому подделать его нельзя. */
     const log = (receipt.logs || []).find(
       (l) => (l.topics || [])[0] === TOPIC && routers.includes((l.address || "").toLowerCase())
     );
 
     if (!log) {
+      if (!routers.includes(to)) {
+        return {
+          tx, found: true, ours: false, status: succeeded ? "success" : "reverted",
+          to: receipt.to,
+          note: "no Voxelithic router settled anything in this transaction",
+        };
+      }
       return {
         tx, found: true, ours: true,
         status: succeeded ? "success" : "reverted",
@@ -64,6 +76,7 @@ module.exports = handler(
       status: "success",
       filled: true,
       router: log.address,
+      ...(routers.includes(to) ? {} : { via: receipt.to }),
       blockNumber: parseInt(receipt.blockNumber, 16),
       gasUsed: parseInt(receipt.gasUsed, 16),
       fill: {

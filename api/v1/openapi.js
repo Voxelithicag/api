@@ -75,10 +75,17 @@ const spec = () => ({
     "/quote": {
       get: {
         tags: ["trading"], operationId: "getQuote",
-        summary: "Best executable quote across direct pools",
+        summary: "Best executable quote, direct or through a bridge",
         description:
           "Every candidate pool is asked through the on-chain quoter. A pool that " +
-          "cannot take the whole size is excluded rather than estimated.",
+          "cannot take the whole size is excluded rather than estimated.\n\n" +
+          "Most equity pairs have no pool of their own: of 105 combinations only " +
+          "eleven do. The rest are reached in two hops through USDG, SPY or WETH, " +
+          "and the route array then carries both. A bridged route is only preferred " +
+          "when it beats the direct one by more than ten basis points, because the " +
+          "second hop is a second fee and a second pool that can run out. Both hops " +
+          "belong to one family: v3 and v4 are executed by different contracts and " +
+          "cannot be mixed inside a route.",
         parameters: [
           { name: "tokenIn", in: "query", required: true, schema: { type: "string" },
             description: "Symbol from /tokens, or a 20 byte address" },
@@ -91,9 +98,14 @@ const spec = () => ({
         responses: {
           200: {
             description:
+              "When the size presses on the price, the quote also carries a split: the " +
+              "order divided across pools of both families, with the legs and the gain " +
+              "in basis points over the single best route. Pass legsV3 and legsV4 to " +
+              "/swap unchanged to execute it; it runs on a separate contract, because " +
+              "the ordinary router takes one route at a time.\n\n" +
               "A quote, or quote:null when no pool could fill the size. The quote carries " +
-              "priceImpactBps, which is what the size itself costs in the pool it would " +
-              "execute against, measured against the same pool at a small reference size. " +
+              "priceImpactBps, which is what the size itself costs along the route it would " +
+              "execute against, measured against that same route at a small reference size. " +
               "Above 100 bps the response also carries a warning field. A caller without " +
               "an independent price should check that number before signing: the quote is " +
               "honest, but on a large order it reflects the depth it consumed rather than " +
@@ -101,7 +113,13 @@ const spec = () => ({
           },
           400: { description: "bad parameters" },
           429: { description: "rate limited" },
-          503: { description: "the quoter could not be read; the request was valid, retry" },
+          503: {
+            description:
+              "the quoter could not be read; the request was valid, retry. Returned " +
+              "rather than an empty quote whenever no pool answered on either the " +
+              "direct or the bridged path: silence from the node is not a fact about " +
+              "the market.",
+          },
         },
       },
     },
@@ -119,13 +137,20 @@ const spec = () => ({
             "application/json": {
               schema: {
                 type: "object",
-                required: ["tokenIn", "tokenOut", "amountIn", "minOut", "route"],
+                required: ["tokenIn", "tokenOut", "amountIn", "minOut"],
                 properties: {
                   tokenIn: { type: "string" },
                   tokenOut: { type: "string" },
                   amountIn: { type: "string" },
                   minOut: { type: "string" },
                   route: { type: "array", description: "The route array from /quote, unchanged" },
+                  legsV3: {
+                    type: "array",
+                    description:
+                      "Split execution: the legsV3 array from the quote's split field, " +
+                      "unchanged. Send it together with legsV4 instead of route.",
+                  },
+                  legsV4: { type: "array", description: "Split execution: the legsV4 array, unchanged" },
                   deadlineSeconds: { type: "integer", minimum: 15, maximum: 3600, default: 300 },
                 },
               },
@@ -143,6 +168,22 @@ const spec = () => ({
           "Reads the receipt and the RouteExecuted log from the chain. Note that chain " +
           "state is pruned after roughly ten minutes, so the reason a revert happened " +
           "can only be recovered while it is fresh. Successful fills stay readable.",
+        parameters: [
+          { name: "tx", in: "query", required: true, schema: { type: "string" } },
+        ],
+        responses: { 200: { description: "ok" }, 400: { description: "bad hash" } },
+      },
+    },
+    "/receipt": {
+      get: {
+        tags: ["trading"], operationId: "fillReceipt",
+        summary: "What a fill paid, against what every venue would have paid",
+        description:
+          "Takes a settled swap and re-quotes every pool for the same pair and size at the " +
+          "block BEFORE the fill, so the order's own footprint is not in the comparison. " +
+          "Returns the whole board, losers included, and says plainly when the route taken " +
+          "was not the best one available. Nothing is stored: the numbers are recomputed " +
+          "from chain state on every request, so any archive node reproduces them.",
         parameters: [
           { name: "tx", in: "query", required: true, schema: { type: "string" } },
         ],

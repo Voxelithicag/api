@@ -49,7 +49,7 @@ module.exports = handler(
     const amountIn = toRaw(q.amountIn, tin.decimals);
     if (amountIn <= 0n) throw bad("amountIn must be greater than zero");
 
-    const { best, all, considered, answered, priceImpactBps } = await quoteBest({
+    const { best, all, considered, answered, priceImpactBps, split } = await quoteBest({
       tokenIn: tin.address,
       tokenOut: tout.address,
       amountIn,
@@ -65,9 +65,12 @@ module.exports = handler(
         poolsConsidered: considered,
         poolsThatAnswered: answered,
         quote: null,
+        /* Мост тоже искали, поэтому «нет прямого пула» больше не причина.
+           Разводим два разных факта: спросили и получили отказ рынка — или
+           спрашивать было некого. */
         reason: considered
-          ? "no pool could fill the whole amount at this size"
-          : "no direct pool exists for this pair",
+          ? "no route could fill the whole amount at this size, direct or bridged"
+          : "no pool holds this pair, and no bridge connects it",
       };
     }
 
@@ -94,16 +97,52 @@ module.exports = handler(
            нет справочной цены, иначе не отличит нормальную сделку от той, что
            съедает пул. */
         priceImpactBps,
+        /* Комиссия роутера уже вычтена из amountOut: она снимается с выходного
+           токена ДО проверки minOut, поэтому котировка без неё дала бы реверт
+           у всех, кто взял minOut отсюда. Отдаём и саму ставку, чтобы её было
+           видно, а не приходилось выводить из разницы. */
+        routerFeeBps: best.feeBps,
         family: best.family,
-        pool: best.pool || best.poolId,
-        // Тот же объект уходит в /api/v1/swap: маршрут не нужно собирать заново.
-        route: [best.hop],
+        /* У маршрута через мост площадок две; отдаём обе, а одиночное поле
+           оставляем только когда хоп действительно один — иначе клиент
+           показал бы половину маршрута как весь. */
+        ...(best.hops.length === 1
+          ? { pool: best.pool || best.poolId }
+          : { pools: best.hops.map((h) => h.pool || h.key) }),
+        /* Прямой маршрут — один хоп, через мост — два. Пары бумага-бумага
+           почти никогда не имеют своего пула и достаются через доллар, SPY
+           или эфир; семья при этом одна на весь маршрут, потому что v3 и v4
+           исполняются разными контрактами. */
+        hops: best.hops.length,
+        ...(best.bridge ? { bridge: best.bridge } : {}),
+        // Тот же массив уходит в /api/v1/swap: маршрут не нужно собирать заново.
+        route: best.hops,
       },
+      /* Разделение ордера по нескольким пулам. Появляется только когда размер
+         действительно давит на цену и когда раскладка ощутимо лучше одиночного
+         маршрута — лишняя нога стоит газа. Исполняется отдельным контрактом:
+         обычный роутер многоногий вызов не примет. */
+      ...(split
+        ? {
+            split: {
+              router: DATA.contracts.routerSplit,
+              amountOut: fromRaw(split.out, tout.decimals),
+              amountOutRaw: split.out,
+              minOut: fromRaw(split.minOut, tout.decimals),
+              minOutRaw: split.minOut,
+              routerFeeBps: split.feeBps,
+              betterByBps: split.gainBps,
+              legs: split.legsV3.length + split.legsV4.length,
+              legsV3: split.legsV3,
+              legsV4: split.legsV4,
+            },
+          }
+        : {}),
       ...(priceImpactBps != null && priceImpactBps >= 100
         ? {
             warning:
               `This size moves the price by ${(priceImpactBps / 100).toFixed(2)} percent ` +
-              `in the pool it would execute against. The quote is real and the router will ` +
+              `along the route it would execute against. The quote is real and the router will ` +
               `honour it, but the number is a consequence of the size and not the market rate. ` +
               `Split the order or reduce it if that was not intended.`,
           }

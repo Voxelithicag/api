@@ -20,6 +20,7 @@ curl 'https://voxelithic.xyz/api/v1/quote?tokenIn=USDG&tokenOut=SPY&amountIn=10'
 | `GET` | `/quote` | Best executable quote across direct pools |
 | `POST` | `/swap` | Unsigned transaction for a route |
 | `GET` | `/verify` | What a transaction actually did |
+| `GET /receipt` | What a fill paid, against what every venue would have paid at that block |
 | `GET` | `/openapi.json` | Machine readable spec and the service level |
 
 ## Three decisions worth knowing
