@@ -13,13 +13,53 @@ const {
   resolveToken, handler, bad,
 } = require("./_lib");
 
+/* Человеческая сумма в сырые единицы. Раньше здесь стояла догадка «если строка
+   из одних цифр и длиннее, чем decimals — значит уже сырые». Она молча ломала
+   главный путь: у USDG шесть знаков, поэтому "1000000" читалось как 1 USDG
+   вместо миллиона, а "999999" — правильно. Агент котировал два миллиона,
+   передавал ту же строку сюда, как велит описание инструмента, и получал
+   calldata на два доллара с minOut, посчитанным на два миллиона. Ответ при
+   этом 200, и расхождения в нём не видно.
+
+   Теперь никаких догадок: это поле всегда человеческое. Сырые единицы
+   передаются отдельными полями amountInRaw и minOutRaw. */
+/* Ноль здесь означает «отдам сколько угодно». Раньше он принимался, и ответ
+   при этом всё равно печатал обещание про revert — то есть гарантию без
+   защиты. Отказываем прямо. */
+const ZERO_MINOUT =
+  "minOut of zero accepts any fill at any price. Take minOut from the quote, " +
+  "or compute a floor you are willing to sign for.";
+
 function toRaw(amount, decimals, field) {
   const s = String(amount).trim();
-  if (/^\d+$/.test(s) && s.length > decimals) return BigInt(s); // уже сырые
   if (!/^\d+(\.\d+)?$/.test(s)) throw bad(`${field} must be a positive decimal number`);
   const [int, frac = ""] = s.split(".");
   if (frac.length > decimals) throw bad(`${field} has more than ${decimals} decimals`);
   return BigInt(int + frac.padEnd(decimals, "0"));
+}
+
+/* Сумма в базовых единицах, как её отдаёт /quote в полях amountInRaw и
+   minOutRaw. Принимается только целое число — ни точки, ни экспоненты. */
+function fromRawField(v, field) {
+  const s = String(v).trim();
+  if (!/^\d+$/.test(s)) throw bad(`${field} must be an integer in base units`);
+  return BigInt(s);
+}
+
+/* Одно число из пары «человеческое / сырое». Даёт понятную ошибку, если
+   пришли оба и они спорят между собой, вместо тихого выбора одного. */
+function amountFrom(body, humanKey, rawKey, decimals) {
+  const hasRaw = body[rawKey] != null;
+  const hasHuman = body[humanKey] != null;
+  if (!hasRaw && !hasHuman) return null;
+  if (hasRaw && !hasHuman) return fromRawField(body[rawKey], rawKey);
+  const human = toRaw(body[humanKey], decimals, humanKey);
+  if (!hasRaw) return human;
+  const raw = fromRawField(body[rawKey], rawKey);
+  if (raw !== human) {
+    throw bad(`${humanKey} and ${rawKey} disagree; send one of them, not both`);
+  }
+  return raw;
 }
 
 module.exports = handler(
@@ -47,10 +87,11 @@ module.exports = handler(
 
       /* Суммы и срок считаются здесь же: общий блок ниже привязан к route,
          а сплит до него не доходит. */
-      if (body.minOut == null) {
-        throw bad("minOut is required; take it from the quote, or compute your own");
+      const minOut = amountFrom(body, "minOut", "minOutRaw", tout.decimals);
+      if (minOut == null) {
+        throw bad("minOut is required; take minOut or minOutRaw from the quote, or compute your own");
       }
-      const minOut = toRaw(body.minOut, tout.decimals, "minOut");
+      if (minOut === 0n) throw bad(ZERO_MINOUT);
       const secs = body.deadlineSeconds == null ? 300 : Number(body.deadlineSeconds);
       if (!Number.isInteger(secs) || secs < 15 || secs > 3600) {
         throw bad("deadlineSeconds must be an integer between 15 and 3600");
@@ -95,16 +136,18 @@ module.exports = handler(
     }
     if (route.length > 3) throw bad("the router accepts at most three hops");
 
-    const amountIn = toRaw(body.amountIn, tin.decimals, "amountIn");
+    const amountIn = amountFrom(body, "amountIn", "amountInRaw", tin.decimals);
+    if (amountIn == null) throw bad("amountIn is required; pass amountIn or amountInRaw");
     if (amountIn <= 0n) throw bad("amountIn must be greater than zero");
 
     /* minOut обязателен и не подставляется по умолчанию. Значение по умолчанию
        здесь означало бы, что мы решаем за пользователя, какой убыток ему
        приемлем, — а именно это число и есть его защита. */
-    if (body.minOut == null) {
-      throw bad("minOut is required; take it from the quote, or compute your own");
+    const minOut = amountFrom(body, "minOut", "minOutRaw", tout.decimals);
+    if (minOut == null) {
+      throw bad("minOut is required; take minOut or minOutRaw from the quote, or compute your own");
     }
-    const minOut = toRaw(body.minOut, tout.decimals, "minOut");
+    if (minOut === 0n) throw bad(ZERO_MINOUT);
 
     const seconds = body.deadlineSeconds == null ? 300 : Number(body.deadlineSeconds);
     if (!Number.isInteger(seconds) || seconds < 15 || seconds > 3600) {

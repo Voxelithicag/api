@@ -5,7 +5,7 @@
  * 0xdEaD. Функции вывода у неё нет ни для кого, включая владельца.
  *
  * `totalBurned` — счётчик самой казны, он только растёт. `sinkBalance` шире:
- * это весь VOXEL на адресе сожжения, включая тот, что сожгли волты лаунчпада,
+ * это весь VOXEL на адресе сожжения, включая сожжённый другими контрактами,
  * поэтому он больше и это не расхождение.
  *
  * Долларовая оценка считается по СПОТУ (цена малого объёма), а не по тому,
@@ -87,7 +87,7 @@ module.exports = handler(
         "0.30% of every swap is taken by the router inside the trade and sent to the treasury. " +
         "The treasury can only buy $VOXEL with it and send that to the burn address — it has no " +
         "withdraw function, for anyone. totalBurned is the treasury's own counter and only goes up. " +
-        "sinkBalance is larger because it also holds VOXEL burned by launchpad vaults.",
+        "sinkBalance is larger because it also holds VOXEL burned by other contracts.",
     };
   },
   { cacheSeconds: 30 }
