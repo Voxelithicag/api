@@ -42,6 +42,7 @@ const spec = () => ({
   tags: [
     { name: "reference", description: "Static facts about the chain and the router" },
     { name: "trading", description: "Quoting and transaction building" },
+    { name: "launch", description: "Launchpad: coins whose fees run a perp engine and burn VOXEL" },
   ],
   paths: {
     "/health": {
@@ -188,6 +189,21 @@ const spec = () => ({
           { name: "tx", in: "query", required: true, schema: { type: "string" } },
         ],
         responses: { 200: { description: "ok" }, 400: { description: "bad hash" } },
+      },
+    },
+    "/burn": {
+      get: {
+        tags: ["treasury"], operationId: "burnStats",
+        summary: "How much $VOXEL the treasury has bought and burned",
+        description:
+          "The router takes 0.30% of every swap inside the trade and sends it to the treasury. " +
+          "The treasury can only buy $VOXEL with what it holds and send that to the burn address; " +
+          "it has no withdraw function, for anyone. totalBurned is the treasury's own counter and " +
+          "only goes up. sinkBalance is larger because the burn address also holds VOXEL burned by " +
+          "other contracts. The dollar figure is priced at spot on a small size, not at what the " +
+          "whole burned amount would fetch at once, which is why the field is named usdAtSpot. " +
+          "pending is what has already accrued and is waiting for the next burn.",
+        responses: { "200": { description: "Burn totals and the queue" } },
       },
     },
   },

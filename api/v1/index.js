@@ -33,6 +33,8 @@ module.exports = handler(
         example: `${BASE}/verify?tx=0x46fb26583f88e16ea546457d24880637f490c54a61a9438068dec3b947970fe4` },
       { method: "GET", path: "/receipt", summary: "What a fill paid, against what every venue would have paid at that block",
         example: `${BASE}/receipt?tx=0x401dac9fe621d30cbf8634f771e4cc6e42ee1c3f353e2f70e769ecf9562b4650` },
+      { method: "GET", path: "/burn", summary: "How much $VOXEL the treasury has bought and burned, and what is queued next",
+        example: `${BASE}/burn` },
       { method: "GET", path: "/openapi.json", summary: "Machine readable spec and the service level",
         example: `${BASE}/openapi.json` },
     ],
