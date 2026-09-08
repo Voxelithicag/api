@@ -42,7 +42,7 @@ const spec = () => ({
   tags: [
     { name: "reference", description: "Static facts about the chain and the router" },
     { name: "trading", description: "Quoting and transaction building" },
-    { name: "launch", description: "Launchpad: coins whose fees run a perp engine and burn VOXEL" },
+    { name: "treasury", description: "Buyback and burn: where the 0.30% swap fee goes" },
   ],
   paths: {
     "/health": {
